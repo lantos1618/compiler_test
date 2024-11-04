@@ -1,0 +1,11 @@
+[package]
+name = "compiler_test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cranelift-codegen = "0.113.0"
+cranelift-frontend = "0.113.0"
+cranelift-jit = "0.113.0"
+cranelift-module = "0.113.0"
+cranelift-native = "0.113.0"
