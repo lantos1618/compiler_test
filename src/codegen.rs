@@ -1162,4 +1162,79 @@ mod tests {
         assert_eq!(result, 0);
     }
 
+
+    #[test]
+    fn test_exp_call() {
+        // Initialize the compiler
+        let mut codegen = get_compiler().unwrap();
+
+        // Define the signature for `exp` function (assumes it takes a f64 and returns an f64)
+        let mut exp_sig = codegen.module.make_signature();
+        exp_sig.params.push(AbiParam::new(types::F64)); // `exp` input as a double (f64)
+        exp_sig.returns.push(AbiParam::new(types::F64)); // `exp` output as a double (f64)
+
+        // Declare `exp` as an imported function
+        let exp_func_id = codegen
+            .module
+            .declare_function("exp", Linkage::Import, &exp_sig)
+            .unwrap();
+
+        // Define the main function signature
+        let mut main_signature = codegen.module.make_signature();
+        main_signature.returns.push(AbiParam::new(types::F64));
+
+        let mut func = Function::new();
+        func.signature = main_signature.clone();
+
+        let mut func_builder_ctx = FunctionBuilderContext::new();
+        let mut func_builder = FunctionBuilder::new(&mut func, &mut func_builder_ctx);
+
+        let entry_block = func_builder.create_block();
+        func_builder.switch_to_block(entry_block);
+
+        // Prepare the argument for `exp`
+        let arg = func_builder.ins().f64const(1.0); // Compute exp(1.0)
+
+        // Get `exp` function reference and call it
+        let exp_ref = codegen
+            .module
+            .declare_func_in_func(exp_func_id, &mut func_builder.func);
+        let call = func_builder.ins().call(exp_ref, &[arg]);
+
+        // Retrieve the result of `exp`
+        let exp_result = func_builder.inst_results(call)[0];
+
+        // Return the result
+        func_builder.ins().return_(&[exp_result]);
+
+        func_builder.seal_block(entry_block);
+        func_builder.finalize();
+
+        // Declare and define the main function
+        let func_id = codegen
+            .module
+            .declare_function("main", Linkage::Export, &main_signature)
+            .unwrap();
+
+        let mut ctx = codegen.module.make_context();
+        ctx.func = func;
+
+        codegen.module.define_function(func_id, &mut ctx).unwrap();
+
+        // Finalize definitions
+        match &mut codegen.module {
+            ModuleType::JITModule(jit) => jit.finalize_definitions().unwrap(),
+            ModuleType::ObjectModule(_) => panic!("Cannot finalize definitions in object module"),
+        }
+
+        // Run main and assert the result (exp(1) ≈ 2.71828)
+        codegen.functions.insert("main".to_string(), func_id);
+        let result = codegen.run_main::<f64>().unwrap();
+
+        assert!(
+            (result - 2.71828).abs() < 1e-5,
+            "exp(1.0) result was incorrect"
+        );
+    }
+
 }
