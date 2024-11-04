@@ -817,4 +817,92 @@ mod tests {
         let result = codegen.run_main::<i32>().unwrap();
         assert_eq!(result, 10); // Should return 1 + 2 + 3 + 4 = 10
     }
+    #[test]
+    fn test_vector() {
+        // Simulating:
+        // int main() {
+        //     int arr[4];  // Stack-allocated array
+        //     arr[0] = 1;
+        //     arr[1] = 2;
+        //     arr[2] = 3;
+        //     arr[3] = 4;
+        //     return arr[0] + arr[1] + arr[2] + arr[3];
+        // }
+        
+        let mut codegen = get_compiler().unwrap();
+
+        let mut signature = codegen.module.make_signature();
+        signature.returns.push(AbiParam::new(types::I32));
+
+        let mut func = Function::new();
+        func.signature = signature.clone();
+
+        let mut func_builder_ctx = FunctionBuilderContext::new();
+        let mut func_builder = FunctionBuilder::new(&mut func, &mut func_builder_ctx);
+
+        let entry_block = func_builder.create_block();
+        func_builder.switch_to_block(entry_block);
+
+        // Create a stack slot for our array (16 bytes: 4 integers × 4 bytes each)
+        let array = func_builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            16,  // size in bytes (4 integers × 4 bytes)
+            4    // alignment
+        ));
+
+        // Get base address of array
+        let base_addr = func_builder.ins().stack_addr(types::I64, array, 0);
+
+        // Store values in array
+        for i in 0..4 {
+            let value = func_builder.ins().iconst(types::I32, (i + 1) as i64);
+            let offset = (i * 4) as i32;  // Each integer is 4 bytes
+            func_builder.ins().store(MemFlags::new(), value, base_addr, offset);
+        }
+
+        // Load values back and sum them
+        let mut sum = func_builder.ins().iconst(types::I32, 0);
+        for i in 0..4 {
+            let offset = (i * 4) as i32;
+            let loaded_value = func_builder.ins().load(
+                types::I32,
+                MemFlags::new(),
+                base_addr,
+                offset
+            );
+            sum = func_builder.ins().iadd(sum, loaded_value);
+        }
+
+        // Return the sum
+        func_builder.ins().return_(&[sum]);
+
+        func_builder.seal_block(entry_block);
+        func_builder.finalize();
+
+        // Print the CLIF IR
+        println!("Function CLIF IR:\n{}", func.display());
+
+        // Declare function
+        let func_id = codegen.module.declare_function("main", Linkage::Export, &signature).unwrap();
+
+        // Create context and assign function
+        let mut ctx = codegen.module.make_context();
+        ctx.func = func;
+
+        // Define the function
+        codegen.module.define_function(func_id, &mut ctx).unwrap();
+
+        // Finalize function definitions
+        match &mut codegen.module {
+            ModuleType::JITModule(jit) => jit.finalize_definitions().unwrap(),
+            ModuleType::ObjectModule(_) => panic!("Cannot finalize definitions in object module"),
+        }
+
+        // Run main and assert result
+        codegen.functions.insert("main".to_string(), func_id);
+        let result = codegen.run_main::<i32>().unwrap();
+        assert_eq!(result, 10); // Should return 1 + 2 + 3 + 4 = 10
+    }
+
+
 }
