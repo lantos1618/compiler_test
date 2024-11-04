@@ -12,7 +12,7 @@ use cranelift_module::{
 };
 use cranelift_object::ObjectModule;
 use delegate::delegate;
-use ir::{FuncRef, Function};
+use ir::{FuncRef, Function, GlobalValue};
 use isa::{TargetFrontendConfig, TargetIsa};
 use std::collections::HashMap;
 use target_lexicon;
@@ -42,6 +42,7 @@ impl ModuleType {
             fn declare_anonymous_function(&mut self, signature: &Signature) -> ModuleResult<FuncId>;
             fn declare_data(&mut self, name: &str, linkage: Linkage, writable: bool, tls: bool) -> ModuleResult<DataId>;
             fn declare_anonymous_data(&mut self, writable: bool, tls: bool) -> ModuleResult<DataId>;
+            fn declare_data_in_func(&mut self, data_id: DataId, func: &mut Function) -> GlobalValue;
             fn define_function(&mut self, func_id: FuncId, ctx: &mut Context) -> ModuleResult<()>;
             fn define_function_with_control_plane(&mut self, func_id: FuncId, ctx: &mut Context, ctrl_plane: &mut ControlPlane) -> ModuleResult<()>;
             fn define_function_bytes(&mut self, func_id: FuncId, func: &Function, alignment: u64, bytes: &[u8], relocs: &[FinalizedMachReloc]) -> ModuleResult<()>;
@@ -1074,94 +1075,94 @@ mod tests {
     fn test_printf_call() {
         // Initialize the compiler
         let mut codegen = get_compiler().unwrap();
-
+    
         // Define the signature for `printf`
         let mut printf_sig = codegen.module.make_signature();
         printf_sig.params.push(AbiParam::new(types::I64));  // pointer to format string
         printf_sig.params.push(AbiParam::new(types::I32));  // integer argument
         printf_sig.returns.push(AbiParam::new(types::I32)); // return value
-
+    
         // Declare `printf` as an imported function
         let printf_func_id = codegen
             .module
             .declare_function("printf", Linkage::Import, &printf_sig)
             .unwrap();
-
+    
         // Define the main function signature
         let mut main_signature = codegen.module.make_signature();
         main_signature.returns.push(AbiParam::new(types::I32));
-
+    
         let mut func = Function::new();
         func.signature = main_signature.clone();
-
+    
         let mut func_builder_ctx = FunctionBuilderContext::new();
         let mut func_builder = FunctionBuilder::new(&mut func, &mut func_builder_ctx);
-
+    
         let entry_block = func_builder.create_block();
         func_builder.switch_to_block(entry_block);
-
-        // Create a stack slot for the format string with proper alignment
+    
+        // Define the format string as a static global
         let format_str = "Hello, %d!\n\0";
-        let stack_slot = func_builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            format_str.len() as u32,
-            8,  // Use 8-byte alignment for better compatibility
-        ));
+        let format_str_id = codegen
+            .module
+            .declare_data("format_str", Linkage::Local, false, false)
+            .unwrap();
 
-        // Get address of the stack slot
-        let format_ptr = func_builder.ins().stack_addr(types::I64, stack_slot, 0);
-
-        // Store the format string bytes
-        for (i, &byte) in format_str.as_bytes().iter().enumerate() {
-            let byte_val = func_builder.ins().iconst(types::I8, byte as i64);
-            func_builder.ins().store(
-                MemFlags::new(),
-                byte_val,
-                format_ptr,
-                i as i32,
-            );
-        }
-
+        let mut data_desc = DataDescription::new();
+        data_desc.define(format_str.as_bytes().to_vec().into_boxed_slice());
+    
+        // Define the data contents in the module context
+        codegen.module.define_data(format_str_id, &data_desc).unwrap();
+        
+        // Create a global value that references our data
+        let gv = codegen.module
+            .declare_data_in_func(format_str_id, &mut func_builder.func);
+        
+        // Get a pointer to the statically allocated format string using the global value
+        let format_ptr = func_builder.ins().global_value(types::I64, gv);
+    
         // Prepare the integer argument for `printf`
         let arg = func_builder.ins().iconst(types::I32, 42);
-
+    
         // Get printf function reference and call it
-        let printf_ref = codegen.module.declare_func_in_func(printf_func_id, &mut func_builder.func);
+        let printf_ref = codegen
+            .module
+            .declare_func_in_func(printf_func_id, &mut func_builder.func);
         let call = func_builder.ins().call(printf_ref, &[format_ptr, arg]);
         
         // Store the printf return value but don't use it
         let _printf_ret = func_builder.inst_results(call)[0];
-
+    
         // Return 0
         let zero = func_builder.ins().iconst(types::I32, 0);
         func_builder.ins().return_(&[zero]);
-
+    
         func_builder.seal_block(entry_block);
         func_builder.finalize();
-
+    
         // Declare and define the main function
         let func_id = codegen
             .module
             .declare_function("main", Linkage::Export, &main_signature)
             .unwrap();
-
+    
         let mut ctx = codegen.module.make_context();
         ctx.func = func;
-
+    
         codegen.module.define_function(func_id, &mut ctx).unwrap();
-
+    
         // Finalize definitions
         match &mut codegen.module {
             ModuleType::JITModule(jit) => jit.finalize_definitions().unwrap(),
             ModuleType::ObjectModule(_) => panic!("Cannot finalize definitions in object module"),
         }
-
+    
         // Run main and assert result
         codegen.functions.insert("main".to_string(), func_id);
         let result = codegen.run_main::<i32>().unwrap();
         assert_eq!(result, 0);
     }
-
+    
 
     #[test]
     fn test_exp_call() {
@@ -1193,7 +1194,8 @@ mod tests {
         func_builder.switch_to_block(entry_block);
 
         // Prepare the argument for `exp`
-        let arg = func_builder.ins().f64const(1.0); // Compute exp(1.0)
+        let value = 2.0;
+        let arg = func_builder.ins().f64const(value); // Compute exp(1.0)
 
         // Get `exp` function reference and call it
         let exp_ref = codegen
@@ -1232,9 +1234,10 @@ mod tests {
         let result = codegen.run_main::<f64>().unwrap();
 
         assert!(
-            (result - 2.71828).abs() < 1e-5,
+            (result - value.exp()).abs() < 1e-5,
             "exp(1.0) result was incorrect"
         );
     }
 
 }
+
