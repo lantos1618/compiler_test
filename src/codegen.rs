@@ -11,6 +11,7 @@ use ir::{FuncRef, Function};
 use isa::{TargetFrontendConfig, TargetIsa};
 use target_lexicon;
 use cranelift_codegen::ir::condcodes::{IntCC, FloatCC};
+use cranelift_codegen::ir::Constant;
 
 
 pub struct Codegen {
@@ -550,5 +551,100 @@ mod tests {
         codegen.functions.insert("main".to_string(), func_id);
         let result = codegen.run_main::<i32>().unwrap();
         assert_eq!(result, 54); // 13 + 7 + 30 + 3 + 1 = 54
+    }
+
+    #[test]
+    fn test_simd() {
+        // Get compiler instance
+        let mut codegen = get_compiler().unwrap();
+
+        let mut signature = codegen.module.make_signature();
+        signature.returns.push(AbiParam::new(types::I32));
+
+        let mut func = Function::new();
+        func.signature = signature.clone();
+
+        let mut func_builder_ctx = FunctionBuilderContext::new();
+        let mut func_builder = FunctionBuilder::new(&mut func, &mut func_builder_ctx);
+
+        let entry_block = func_builder.create_block();
+        func_builder.switch_to_block(entry_block);
+
+        // Create SIMD vector type I32x4 (vector of 4 32-bit integers)
+        let i32x4_type = types::I32X4;
+
+        // Create first vector [1,2,3,4]
+        let a_const = func_builder.ins().iconst(types::I32, 1);
+        let b_const = func_builder.ins().iconst(types::I32, 2);
+        let c_const = func_builder.ins().iconst(types::I32, 3);
+        let d_const = func_builder.ins().iconst(types::I32, 4);
+        
+        // Create second vector [10,20,30,40]
+        let e_const = func_builder.ins().iconst(types::I32, 10);
+        let f_const = func_builder.ins().iconst(types::I32, 20);
+        let g_const = func_builder.ins().iconst(types::I32, 30);
+        let h_const = func_builder.ins().iconst(types::I32, 40);
+
+        // Create SIMD vectors
+        let a_vector = func_builder.ins().scalar_to_vector(i32x4_type, a_const);
+        let a_vector = func_builder.ins().insertlane(a_vector, b_const, 1);
+        let a_vector = func_builder.ins().insertlane(a_vector, c_const, 2);
+        let a_vector = func_builder.ins().insertlane(a_vector, d_const, 3);
+
+        let b_vector = func_builder.ins().scalar_to_vector(i32x4_type, e_const);
+        let b_vector = func_builder.ins().insertlane(b_vector, f_const, 1);
+        let b_vector = func_builder.ins().insertlane(b_vector, g_const, 2);
+        let b_vector = func_builder.ins().insertlane(b_vector, h_const, 3);
+
+        // Add vectors
+        let result_vector = func_builder.ins().iadd(a_vector, b_vector);
+
+        // Extract first lane (should be 11 = 1 + 10)
+        let result = func_builder.ins().extractlane(result_vector, 0);
+
+        // Return the result
+        func_builder.ins().return_(&[result]);
+
+        func_builder.seal_block(entry_block);
+        func_builder.finalize();
+
+        // Declare function
+        let func_id = codegen.module.declare_function("main", Linkage::Export, &signature).unwrap();
+
+        // print the CLIF IR
+        println!("Function CLIF IR:\n{}", func.display());
+
+        // Create context and assign function
+        let mut ctx = codegen.module.make_context();
+        ctx.func = func;
+
+        // Define the function
+        codegen.module.define_function(func_id, &mut ctx).unwrap();
+
+
+        // Finalize function definitions
+        match &mut codegen.module {
+            ModuleType::JITModule(jit) => jit.finalize_definitions().unwrap(),
+            ModuleType::ObjectModule(_) => panic!("Cannot finalize definitions in object module"),
+        }
+
+        // Run main and assert result
+        codegen.functions.insert("main".to_string(), func_id);
+        let result = codegen.run_main::<i32>().unwrap();
+        assert_eq!(result, 11); // First element should be 1 + 10 = 11
+    }
+
+    #[test]
+    fn test_struct() {
+        // struct Point {
+        //     int x;
+        //     int y;
+        // }
+        // int main() {
+        //     Point p;
+        //     p.x = 1;
+        //     p.y = 2;
+        //     return p.x + p.y;
+        // }
     }
 }
