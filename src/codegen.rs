@@ -300,5 +300,78 @@ mod tests {
         assert_eq!(result, 10); // The loop will increment i until it equals 10
     }
     
-    
+    #[test]
+    fn test_pointer() {
+        // Equivalent to:
+        // int main() { 
+        //     int x = 42;
+        //     int* ptr = &x;
+        //     *ptr = 100;
+        //     return x;
+        // }
+        let mut codegen = get_compiler().unwrap();
+
+        let mut signature = codegen.module.make_signature();
+        signature.returns.push(AbiParam::new(types::I32));
+
+        let mut func = Function::new();
+        func.signature = signature.clone();
+
+        let mut func_builder_ctx = FunctionBuilderContext::new();
+        let mut func_builder = FunctionBuilder::new(&mut func, &mut func_builder_ctx);
+
+        // Create entry block
+        let entry_block = func_builder.create_block();
+        func_builder.switch_to_block(entry_block);
+
+        // Create stack slot for x
+        let stack_slot = func_builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            4,  // size in bytes for i32
+            8   // alignment in bytes
+        ));
+
+        // Store initial value (42) to stack
+        let forty_two = func_builder.ins().iconst(types::I32, 42);
+        func_builder.ins().stack_store(forty_two, stack_slot, 0);
+
+        // Load address of stack slot (simulating &x)
+        let ptr = func_builder.ins().stack_addr(types::I64, stack_slot, 0);
+
+        // Store new value (100) through the pointer
+        let hundred = func_builder.ins().iconst(types::I32, 100);
+        func_builder.ins().store(MemFlags::new(), hundred, ptr, 0);
+
+        // Load final value and return
+        let result = func_builder.ins().stack_load(types::I32, stack_slot, 0);
+        func_builder.ins().return_(&[result]);
+
+        // Seal the block and finalize
+        func_builder.seal_block(entry_block);
+        func_builder.finalize();
+
+        // Print the CLIF IR
+        println!("Function CLIF IR:\n{}", func.display());
+
+        // Declare function
+        let func_id = codegen.module.declare_function("main", Linkage::Export, &signature).unwrap();
+
+        // Create context and assign function
+        let mut ctx = codegen.module.make_context();
+        ctx.func = func;
+
+        // Define the function
+        codegen.module.define_function(func_id, &mut ctx).unwrap();
+
+        // Finalize function definitions
+        match &mut codegen.module {
+            ModuleType::JITModule(jit) => jit.finalize_definitions().unwrap(),
+            ModuleType::ObjectModule(_) => panic!("Cannot finalize definitions in object module"),
+        }
+
+        // Run main and assert result
+        codegen.functions.insert("main".to_string(), func_id);
+        let result = codegen.run_main::<i32>().unwrap();
+        assert_eq!(result, 100); // Should return 100 after pointer modification
+    }
 }

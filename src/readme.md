@@ -1,6 +1,6 @@
 # compiler_tests
 
-This repo is for testing the Cranelift compiler functionality.
+This repo is for testing the Cranelift compiler functionality. It explores the underling instruction functions of the Cranelift compiler.
 
 ## Features to Test
 
