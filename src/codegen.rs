@@ -484,4 +484,71 @@ mod tests {
         let result = codegen.run_main::<i32>().unwrap();
         assert_eq!(result, 100); // Should return 100 after pointer modification
     }
+
+    #[test]
+    fn test_arithmetic_operations() {
+        // Equivalent to:
+        // int main() {
+        //     int a = 10;
+        //     int b = 3;
+        //     int sum = a + b;        // 13
+        //     int diff = a - b;       // 7
+        //     int prod = a * b;       // 30
+        //     int quot = a / b;       // 3
+        //     int rem = a % b;        // 1
+        //     return sum + diff + prod + quot + rem; // 54
+        // }
+        let mut codegen = get_compiler().unwrap();
+
+        let mut signature = codegen.module.make_signature();
+        signature.returns.push(AbiParam::new(types::I32));
+
+        let mut func = Function::new();
+        func.signature = signature.clone();
+
+        let mut func_builder_ctx = FunctionBuilderContext::new();
+        let mut func_builder = FunctionBuilder::new(&mut func, &mut func_builder_ctx);
+
+        let entry_block = func_builder.create_block();
+        func_builder.switch_to_block(entry_block);
+
+        // Create the values
+        let a = func_builder.ins().iconst(types::I32, 10);
+        let b = func_builder.ins().iconst(types::I32, 3);
+
+        // Perform arithmetic operations
+        let sum = func_builder.ins().iadd(a, b);
+        let diff = func_builder.ins().isub(a, b);
+        let prod = func_builder.ins().imul(a, b);
+        let quot = func_builder.ins().sdiv(a, b);
+        let rem = func_builder.ins().srem(a, b);
+
+        // Sum all results
+        let temp1 = func_builder.ins().iadd(sum, diff);
+        let temp2 = func_builder.ins().iadd(temp1, prod);
+        let temp3 = func_builder.ins().iadd(temp2, quot);
+        let final_result = func_builder.ins().iadd(temp3, rem);
+
+        func_builder.ins().return_(&[final_result]);
+
+        func_builder.seal_block(entry_block);
+        func_builder.finalize();
+
+        // Declare and define function
+        let func_id = codegen.module.declare_function("main", Linkage::Export, &signature).unwrap();
+        let mut ctx = codegen.module.make_context();
+        ctx.func = func;
+        codegen.module.define_function(func_id, &mut ctx).unwrap();
+
+        // Finalize function definitions
+        match &mut codegen.module {
+            ModuleType::JITModule(jit) => jit.finalize_definitions().unwrap(),
+            ModuleType::ObjectModule(_) => panic!("Cannot finalize definitions in object module"),
+        }
+
+        // Run main and assert result
+        codegen.functions.insert("main".to_string(), func_id);
+        let result = codegen.run_main::<i32>().unwrap();
+        assert_eq!(result, 54); // 13 + 7 + 30 + 3 + 1 = 54
+    }
 }
