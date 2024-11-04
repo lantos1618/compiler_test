@@ -636,9 +636,9 @@ mod tests {
 
     #[test]
     fn test_struct() {
-        // struct Point {
-        //     int x;
-        //     int y;
+        // Struct Point {
+        //  x: i32
+        //  y: i32
         // }
         // int main() {
         //     Point p;
@@ -646,5 +646,175 @@ mod tests {
         //     p.y = 2;
         //     return p.x + p.y;
         // }
+        // Create compiler instance
+        let mut codegen = get_compiler().unwrap();
+
+        let mut signature = codegen.module.make_signature();
+        signature.returns.push(AbiParam::new(types::I32));
+
+        let mut func = Function::new();
+        func.signature = signature.clone();
+
+        let mut func_builder_ctx = FunctionBuilderContext::new();
+        let mut func_builder = FunctionBuilder::new(&mut func, &mut func_builder_ctx);
+
+        let entry_block = func_builder.create_block();
+        func_builder.switch_to_block(entry_block);
+
+        // Create a stack slot for our Point struct (8 bytes: 4 for x, 4 for y)
+        let point_struct = func_builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            8,  // size in bytes (4 bytes each for x and y)
+            4   // alignment
+        ));
+
+        // Store x = 1 at offset 0
+        let x_value = func_builder.ins().iconst(types::I32, 1);
+        func_builder.ins().stack_store(x_value, point_struct, 0);
+
+        // Store y = 2 at offset 4
+        let y_value = func_builder.ins().iconst(types::I32, 2);
+        func_builder.ins().stack_store(y_value, point_struct, 4);
+
+        // Load x and y back from memory
+        let loaded_x = func_builder.ins().stack_load(types::I32, point_struct, 0);
+        let loaded_y = func_builder.ins().stack_load(types::I32, point_struct, 4);
+
+        // Add x + y
+        let result = func_builder.ins().iadd(loaded_x, loaded_y);
+
+        // Return the result
+        func_builder.ins().return_(&[result]);
+
+        func_builder.seal_block(entry_block);
+        func_builder.finalize();
+
+        // Print the CLIF IR
+        println!("Function CLIF IR:\n{}", func.display());
+
+        // Declare function
+        let func_id = codegen.module.declare_function("main", Linkage::Export, &signature).unwrap();
+
+        // Create context and assign function
+        let mut ctx = codegen.module.make_context();
+        ctx.func = func;
+
+        // Define the function
+        codegen.module.define_function(func_id, &mut ctx).unwrap();
+
+        // Finalize function definitions
+        match &mut codegen.module {
+            ModuleType::JITModule(jit) => jit.finalize_definitions().unwrap(),
+            ModuleType::ObjectModule(_) => panic!("Cannot finalize definitions in object module"),
+        }
+
+        // Run main and assert result
+        codegen.functions.insert("main".to_string(), func_id);
+        let result = codegen.run_main::<i32>().unwrap();
+        assert_eq!(result, 3); // Should return 1 + 2 = 3
+    }
+
+    #[test]
+    fn test_complex_struct() {
+        // struct Point {
+        //     x: i32
+        //     y: i32
+        // }
+        // struct Line {
+        //     start: Point
+        //     end: Point
+        // }
+        // int main() {
+        //     Line line;
+        //     line.start.x = 1;
+        //     line.start.y = 2;
+        //     line.end.x = 3;
+        //     line.end.y = 4;
+        //     return line.start.x + line.start.y + line.end.x + line.end.y;
+        // }
+        
+        let mut codegen = get_compiler().unwrap();
+
+        let mut signature = codegen.module.make_signature();
+        signature.returns.push(AbiParam::new(types::I32));
+
+        let mut func = Function::new();
+        func.signature = signature.clone();
+
+        let mut func_builder_ctx = FunctionBuilderContext::new();
+        let mut func_builder = FunctionBuilder::new(&mut func, &mut func_builder_ctx);
+
+        let entry_block = func_builder.create_block();
+        func_builder.switch_to_block(entry_block);
+
+        // Create a stack slot for Line struct
+        // Size = 16 bytes (2 Points × (2 i32s × 4 bytes))
+        // Layout:
+        // 0-3:   start.x
+        // 4-7:   start.y
+        // 8-11:  end.x
+        // 12-15: end.y
+        let line_struct = func_builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            16,  // total size in bytes
+            4    // alignment
+        ));
+
+        // Store line.start.x = 1 at offset 0
+        let start_x = func_builder.ins().iconst(types::I32, 1);
+        func_builder.ins().stack_store(start_x, line_struct, 0);
+
+        // Store line.start.y = 2 at offset 4
+        let start_y = func_builder.ins().iconst(types::I32, 2);
+        func_builder.ins().stack_store(start_y, line_struct, 4);
+
+        // Store line.end.x = 3 at offset 8
+        let end_x = func_builder.ins().iconst(types::I32, 3);
+        func_builder.ins().stack_store(end_x, line_struct, 8);
+
+        // Store line.end.y = 4 at offset 12
+        let end_y = func_builder.ins().iconst(types::I32, 4);
+        func_builder.ins().stack_store(end_y, line_struct, 12);
+
+        // Load all values back from memory
+        let loaded_start_x = func_builder.ins().stack_load(types::I32, line_struct, 0);
+        let loaded_start_y = func_builder.ins().stack_load(types::I32, line_struct, 4);
+        let loaded_end_x = func_builder.ins().stack_load(types::I32, line_struct, 8);
+        let loaded_end_y = func_builder.ins().stack_load(types::I32, line_struct, 12);
+
+        // Add all values: start.x + start.y + end.x + end.y
+        let sum1 = func_builder.ins().iadd(loaded_start_x, loaded_start_y);
+        let sum2 = func_builder.ins().iadd(loaded_end_x, loaded_end_y);
+        let result = func_builder.ins().iadd(sum1, sum2);
+
+        // Return the result
+        func_builder.ins().return_(&[result]);
+
+        func_builder.seal_block(entry_block);
+        func_builder.finalize();
+
+        // Print the CLIF IR
+        println!("Function CLIF IR:\n{}", func.display());
+
+        // Declare function
+        let func_id = codegen.module.declare_function("main", Linkage::Export, &signature).unwrap();
+
+        // Create context and assign function
+        let mut ctx = codegen.module.make_context();
+        ctx.func = func;
+
+        // Define the function
+        codegen.module.define_function(func_id, &mut ctx).unwrap();
+
+        // Finalize function definitions
+        match &mut codegen.module {
+            ModuleType::JITModule(jit) => jit.finalize_definitions().unwrap(),
+            ModuleType::ObjectModule(_) => panic!("Cannot finalize definitions in object module"),
+        }
+
+        // Run main and assert result
+        codegen.functions.insert("main".to_string(), func_id);
+        let result = codegen.run_main::<i32>().unwrap();
+        assert_eq!(result, 10); // Should return 1 + 2 + 3 + 4 = 10
     }
 }
