@@ -1,11 +1,14 @@
 use std::collections::HashMap;
+use control::ControlPlane;
 use delegate::delegate;
 use anyhow::Result;
 use cranelift::prelude::*;
 use cranelift_jit::{JITModule, JITBuilder};
-use cranelift_module::{FuncId, DataId, Module, Linkage, ModuleResult};
+use cranelift_module::{DataDescription, DataId, FuncId, FuncOrDataId, Linkage, Module, ModuleDeclarations, ModuleResult};
 use cranelift_object::ObjectModule;
 use cranelift_codegen::*;
+use ir::{FuncRef, Function};
+use isa::{TargetFrontendConfig, TargetIsa};
 use target_lexicon;
 use cranelift_codegen::ir::condcodes::{IntCC, FloatCC};
 
@@ -20,25 +23,30 @@ pub enum ModuleType {
     ObjectModule(ObjectModule),
 }
 
+// this is a helper to delegate the methods to the correct underlying method
 impl ModuleType {
     delegate! {
         to match self {
             Self::JITModule(jit) => jit,
             Self::ObjectModule(obj) => obj,
         } {
-            fn isa(&self) -> &dyn cranelift_codegen::isa::TargetIsa;
-            fn declarations(&self) -> &cranelift_module::ModuleDeclarations;
+            fn isa(&self) -> &dyn TargetIsa;
+            fn declarations(&self) -> &ModuleDeclarations;
             fn declare_function(&mut self, name: &str, linkage: Linkage, signature: &Signature) -> ModuleResult<FuncId>;
+            fn declare_func_in_func(&mut self, func_id: FuncId, func: &mut Function) -> FuncRef;
             fn declare_anonymous_function(&mut self, signature: &Signature) -> ModuleResult<FuncId>;
             fn declare_data(&mut self, name: &str, linkage: Linkage, writable: bool, tls: bool) -> ModuleResult<DataId>;
             fn declare_anonymous_data(&mut self, writable: bool, tls: bool) -> ModuleResult<DataId>;
-            fn define_function(&mut self, id: FuncId, ctx: &mut cranelift_codegen::Context) -> ModuleResult<()>;
-            fn define_data(&mut self, id: DataId, data: &cranelift_module::DataDescription) -> ModuleResult<()>;
+            fn define_function(&mut self, func_id: FuncId, ctx: &mut Context) -> ModuleResult<()>;
+            fn define_function_with_control_plane(&mut self, func_id: FuncId, ctx: &mut Context, ctrl_plane: &mut ControlPlane) -> ModuleResult<()>;
+            fn define_function_bytes(&mut self, func_id: FuncId, func: &Function, alignment: u64, bytes: &[u8], relocs: &[FinalizedMachReloc]) -> ModuleResult<()>;
+            fn define_data(&mut self, data_id: DataId, data: &DataDescription) -> ModuleResult<()>;
+            fn get_name(&self, name: &str) -> Option<FuncOrDataId>;
             fn make_signature(&self) -> Signature;
-            fn make_context(&self) -> cranelift_codegen::Context;
-            fn clear_context(&self, ctx: &mut cranelift_codegen::Context);
+            fn make_context(&self) -> Context;
+            fn clear_context(&self, ctx: &mut Context);
             fn clear_signature(&self, sig: &mut Signature);
-            fn target_config(&self) -> cranelift_codegen::isa::TargetFrontendConfig;
+            fn target_config(&self) -> TargetFrontendConfig;
         }
     }
 }
@@ -299,6 +307,108 @@ mod tests {
         let result = codegen.run_main::<i32>().unwrap();
         assert_eq!(result, 10); // The loop will increment i until it equals 10
     }
+    #[test]
+    fn test_function_definition_and_call() {
+        // int add(int a, int b) { return a + b; }
+        // int main() { return add(1, 2); }
+    
+        let mut codegen = get_compiler().unwrap();
+    
+        // Define signature for add function (takes two i32, returns i32)
+        let mut add_signature = codegen.module.make_signature();
+        add_signature.params.push(AbiParam::new(types::I32));
+        add_signature.params.push(AbiParam::new(types::I32));
+        add_signature.returns.push(AbiParam::new(types::I32));
+    
+        // Create add function
+        let mut add_func = Function::new();
+        add_func.signature = add_signature.clone();
+    
+        let mut add_func_builder_ctx = FunctionBuilderContext::new();
+        let mut add_func_builder = FunctionBuilder::new(&mut add_func, &mut add_func_builder_ctx);
+    
+        // Create entry block for add function
+        let add_entry_block = add_func_builder.create_block();
+        add_func_builder.switch_to_block(add_entry_block);
+    
+        // Get the parameters a and b
+        let a = add_func_builder.append_block_param(add_entry_block, types::I32);
+        let b = add_func_builder.append_block_param(add_entry_block, types::I32);
+    
+        // Perform the addition: a + b
+        let sum = add_func_builder.ins().iadd(a, b);
+        add_func_builder.ins().return_(&[sum]);
+    
+        add_func_builder.seal_block(add_entry_block);
+        add_func_builder.finalize();
+    
+        // Declare add function
+        let add_func_id = codegen.module.declare_function("add", Linkage::Export, &add_signature).unwrap();
+    
+        // Create context and assign add function
+        let mut add_ctx = codegen.module.make_context();
+        add_ctx.func = add_func;
+    
+        // Define add function
+        codegen.module.define_function(add_func_id, &mut add_ctx).unwrap();
+    
+        // Now, create the main function that calls add(1, 2)
+    
+        let mut main_signature = codegen.module.make_signature();
+        main_signature.returns.push(AbiParam::new(types::I32));
+    
+        let mut main_func = Function::new();
+        main_func.signature = main_signature.clone();
+    
+        let mut main_func_builder_ctx = FunctionBuilderContext::new();
+        let mut main_func_builder = FunctionBuilder::new(&mut main_func, &mut main_func_builder_ctx);
+    
+        // Create entry block for main function
+        let main_entry_block = main_func_builder.create_block();
+        main_func_builder.switch_to_block(main_entry_block);
+    
+        // Define the arguments to pass to add (1, 2)
+        let one = main_func_builder.ins().iconst(types::I32, 1);
+        let two = main_func_builder.ins().iconst(types::I32, 2);
+    
+        // Convert FuncId to FuncRef
+        let add_func_ref = codegen.module.declare_func_in_func(add_func_id, &mut main_func_builder.func);
+    
+        // Call the add function
+        let call = main_func_builder.ins().call(add_func_ref, &[one, two]);
+        let result = main_func_builder.inst_results(call)[0];
+    
+        // Return the result of add(1, 2)
+        main_func_builder.ins().return_(&[result]);
+    
+        main_func_builder.seal_block(main_entry_block);
+        main_func_builder.finalize();
+    
+        // Declare main function
+        let main_func_id = codegen.module.declare_function("main", Linkage::Export, &main_signature).unwrap();
+    
+        // Create context and assign main function
+        let mut main_ctx = codegen.module.make_context();
+        main_ctx.func = main_func;
+    
+        // Define main function
+        
+        codegen.module.define_function(main_func_id, &mut main_ctx).unwrap();
+    
+        // Finalize function definitions
+        match &mut codegen.module {
+            ModuleType::JITModule(jit) => jit.finalize_definitions().unwrap(),
+            ModuleType::ObjectModule(_) => panic!("Cannot finalize definitions in object module"),
+        }
+    
+        // Insert main function into codegen and run it
+        codegen.functions.insert("main".to_string(), main_func_id);
+        let result = codegen.run_main::<i32>().unwrap();
+    
+        // Assert that main returns the expected result (1 + 2 = 3)
+        assert_eq!(result, 3);
+    }
+    
     
     #[test]
     fn test_pointer() {
