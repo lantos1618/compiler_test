@@ -57,6 +57,8 @@ impl ModuleType {
     }
 }
 
+
+
 impl Codegen {
     pub fn new(module: ModuleType) -> Self {
         Self {
@@ -154,6 +156,8 @@ mod tests {
             ModuleType::ObjectModule(_) => panic!("Cannot finalize definitions in object module"),
         }
 
+
+        println!("Declarations:\n{:?}", codegen.module.declarations());
         // Run main and assert result
         codegen.functions.insert("main".to_string(), func_id);
         let result = codegen.run_main::<i32>().unwrap();
@@ -1101,25 +1105,22 @@ mod tests {
         let entry_block = func_builder.create_block();
         func_builder.switch_to_block(entry_block);
     
-        // Define the format string as a static global
-        let format_str = "Hello, %d!\n\0";
+        // Define the format string as a static global with explicit null termination
+        let format_str = b"Hello, %d!\n\0"; // Using a byte string with null termination
         let format_str_id = codegen
             .module
             .declare_data("format_str", Linkage::Local, false, false)
             .unwrap();
-
+    
         let mut data_desc = DataDescription::new();
-        data_desc.define(format_str.as_bytes().to_vec().into_boxed_slice());
+        data_desc.define(format_str.to_vec().into_boxed_slice());
     
         // Define the data contents in the module context
         codegen.module.define_data(format_str_id, &data_desc).unwrap();
-        
-        // Create a global value that references our data
-        let gv = codegen.module
-            .declare_data_in_func(format_str_id, &mut func_builder.func);
-        
-        // Get a pointer to the statically allocated format string using the global value
-        let format_ptr = func_builder.ins().global_value(types::I64, gv);
+    
+        // Explicitly resolve the format string address in the runtime
+        let format_ptr = codegen.module.declare_data_in_func(format_str_id, &mut func_builder.func);
+        let format_ptr_addr = func_builder.ins().global_value(types::I64, format_ptr);
     
         // Prepare the integer argument for `printf`
         let arg = func_builder.ins().iconst(types::I32, 42);
@@ -1128,8 +1129,8 @@ mod tests {
         let printf_ref = codegen
             .module
             .declare_func_in_func(printf_func_id, &mut func_builder.func);
-        let call = func_builder.ins().call(printf_ref, &[format_ptr, arg]);
-        
+        let call = func_builder.ins().call(printf_ref, &[format_ptr_addr, arg]);
+    
         // Store the printf return value but don't use it
         let _printf_ret = func_builder.inst_results(call)[0];
     
@@ -1145,6 +1146,9 @@ mod tests {
             .module
             .declare_function("main", Linkage::Export, &main_signature)
             .unwrap();
+
+        // print the CLIF IR
+        println!("Function CLIF IR:\n{}", func.display());
     
         let mut ctx = codegen.module.make_context();
         ctx.func = func;
@@ -1235,7 +1239,8 @@ mod tests {
 
         assert!(
             (result - value.exp()).abs() < 1e-5,
-            "exp(1.0) result was incorrect"
+            "exp({}) result was incorrect",
+            value
         );
     }
 
